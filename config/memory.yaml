@@ -1,0 +1,13 @@
+memory:
+  sqlite_path: "data/chat_history.db"
+  max_messages_per_conversation: 24
+  keep_recent_messages: 12
+  summary_role: "system"
+  time_logic_parse_retry_max: 2
+  time_logic_parse_timeout_sec: 30
+  roles_logic_parse_retry_max: 2
+  roles_logic_parse_timeout_sec: 30
+  summary_prompt: |
+    You compress long conversation history into stable memory for future turns.
+    Keep factual commitments, user preferences, unresolved tasks, constraints, and decisions.
+    Remove repetitive chatter and keep the result concise (<= 220 words).
