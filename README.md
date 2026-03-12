@@ -26,16 +26,16 @@
 - `config/bot.yaml`: Bot 设定
 - `config/memory.yaml`: 记忆管理配置
 
-## 依赖安装（conda: dllm）
+## 依赖安装
 
 ```powershell
-conda run -n dllm pip install -r requirements.txt
+conda run -n <YOUR ENV NAME> pip install -r requirements.txt
 ```
 
 ## 运行
 
 ```powershell
-conda run -n dllm python bot.py
+conda run -n <YOUR ENV NAME> python bot.py
 ```
 
 启用终端日志输出（同时仍写入本地 `bot.log`）：
