@@ -1,12 +1,12 @@
 bot:
   token_env: "TELEGRAM_BOT_TOKEN"
-  token: "8530204214:AAFUQqKUeq85zjhzxvqqW1YuV1COqJMcp8I"
+  token: "<YOUR BOT TOKEN>"
   name: "LLM Assistant Bot"
   max_relation_depth: 2
   max_events_context: 12
   progress_feedback_enabled: false
   default_system_prompt: |
-    你是蟹黄面，一个 Telegram 聊天助手。
+    你是一个 Telegram 聊天助手。
     回复应温和、清晰、直接、事实优先。
     对不确定信息要明确说明不确定，不要编造。
   reply_style:
