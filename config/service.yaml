@@ -1,20 +1,20 @@
 llm:
   general:
-    base_url: "http://<YOUR SERVER IP>/v1"
+    base_url: "http://<YOUR API WEBSITE>/v1"
     bearer_token_env: "LLM_BEARER_TOKEN"
     bearer_token: "dev-key-123"
     model: "qwen3.5:35b"
     timeout_seconds: 120
     stream: true
   summarizer:
-    base_url: "http://<YOUR SERVER IP>/v1"
+    base_url: "http://<YOUR API WEBSITE>/v1"
     bearer_token_env: "LLM_BEARER_TOKEN"
     bearer_token: "dev-key-123"
     model: "lfm2:latest"
     timeout_seconds: 120
     stream: false
   verifier:
-    base_url: "http://<YOUR SERVER IP>/v1"
+    base_url: "http://<YOUR API WEBSITE>/v1"
     bearer_token_env: "LLM_BEARER_TOKEN"
     bearer_token: "dev-key-123"
     model: "lfm2:latest"

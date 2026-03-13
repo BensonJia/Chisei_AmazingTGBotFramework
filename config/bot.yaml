@@ -1,14 +1,16 @@
 bot:
   token_env: "TELEGRAM_BOT_TOKEN"
-  token: "<YOUR BOT TOKEN>"
+  token: "<TG BOT TOKEN>"
   name: "LLM Assistant Bot"
   max_relation_depth: 2
   max_events_context: 12
   progress_feedback_enabled: false
+  tgStream: true
+  tgStreamIntervalSec: 1
+  tgStreamRetry: 2
   default_system_prompt: |
-    你是一个 Telegram 聊天助手。
-    回复应温和、清晰、直接、事实优先。
-    对不确定信息要明确说明不确定，不要编造。
+    你是蟹酱，一个针砭时弊、毒辣而一针见血的评论家。
+    回复应简洁、清晰、直接、事实优先，语言风格应风趣幽默。
   reply_style:
     emoji_enabled: true
     emoji_pool: ["🙂", "🤖", "✨", "🧠", "👍", "🤣", "😅"]

@@ -268,9 +268,9 @@ class TelegramBotService:
         self,
         session_key: str,
         llm_messages: list[dict[str, str]],
-        update_partial: Callable[[str], Awaitable[None]],
-        flush_interval_sec: float = 0.8,
-        min_flush_chars: int = 24,
+        stream_buffer: list[str],
+        update_partial: Callable[[str], Awaitable[None]] | None = None,
+        flush_interval_sec: float = 1.0,
     ) -> str:
         queue: asyncio.Queue[str | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -287,7 +287,6 @@ class TelegramBotService:
             )
         )
 
-        parts: list[str] = []
         last_text_len = 0
         last_flush_ts = time.monotonic()
         try:
@@ -300,24 +299,74 @@ class TelegramBotService:
                     continue
                 if chunk is None:
                     continue
-                parts.append(chunk)
-                current = "".join(parts)
+                stream_buffer.append(chunk)
+                current = "".join(stream_buffer)
                 now = time.monotonic()
-                if (len(current) - last_text_len) >= min_flush_chars or (
-                    now - last_flush_ts
-                ) >= flush_interval_sec:
+                if (
+                    update_partial is not None
+                    and len(current) > last_text_len
+                    and (now - last_flush_ts) >= flush_interval_sec
+                ):
                     await update_partial(current)
                     last_text_len = len(current)
                     last_flush_ts = now
             final_text = await producer_task
-            if final_text and len(final_text) != last_text_len:
-                await update_partial(final_text)
-            return final_text
+            if final_text and not stream_buffer:
+                stream_buffer.append(final_text)
+            final_current = "".join(stream_buffer)
+            if update_partial is not None and final_current and len(final_current) != last_text_len:
+                await update_partial(final_current)
+            if final_current:
+                return final_current.strip()
+            return final_text.strip()
         except Exception:
             producer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await producer_task
             raise
+
+    async def _reply_with_retry(
+        self,
+        message: Message,
+        text: str,
+        reply_to_message_id: int | None,
+        retry_count: int,
+    ) -> Message | None:
+        attempts = max(1, retry_count + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self.adapter.reply_text(
+                    message,
+                    text,
+                    reply_to_message_id=reply_to_message_id,
+                )
+            except Exception:
+                logger.warning(
+                    "telegram_send_failed attempt=%s/%s",
+                    attempt,
+                    attempts,
+                    exc_info=True,
+                )
+        return None
+
+    async def _edit_with_retry(
+        self,
+        message: Message,
+        text: str,
+        retry_count: int,
+    ) -> Message | None:
+        attempts = max(1, retry_count + 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self.adapter.edit_text(message, text)
+            except Exception:
+                logger.warning(
+                    "telegram_edit_failed attempt=%s/%s",
+                    attempt,
+                    attempts,
+                    exc_info=True,
+                )
+        return None
 
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         incoming = self.adapter.parse_message(update)
@@ -376,10 +425,12 @@ class TelegramBotService:
             )
         )
 
-        typing_task = asyncio.create_task(
-            self.adapter.typing_loop(context, incoming.chat_id, interval_seconds=4.0)
-        )
+        retry_count = self.config.bot.tg_stream_retry
+        stream_interval_sec = self.config.bot.tg_stream_interval_sec
+        stream_buffer: list[str] = []
         stream_message: Message | None = None
+        typing_task: asyncio.Task[None] | None = None
+        answer = ""
         try:
             llm_messages, relation_count, event_count = await self.dispatcher.run(
                 incoming.conversation_key,
@@ -394,59 +445,97 @@ class TelegramBotService:
                 relation_count,
                 event_count,
             )
-            if self.config.bot.progress_feedback_enabled:
-                await self.adapter.reply_text(
-                    update.message,
-                    f"背景已加载完成（关系{relation_count}条，事件{event_count}条），正在生成回复...",
-                    reply_to_message_id=incoming.tg_message_id,
-                )
-            stream_message = await self.adapter.reply_text(
+            stream_message = await self._reply_with_retry(
                 update.message,
                 "正在生成回复...",
-                reply_to_message_id=incoming.tg_message_id,
+                incoming.tg_message_id,
+                retry_count,
             )
-
-            async def update_partial(text: str) -> None:
-                content = text.strip() or "正在生成回复..."
+            if self.config.bot.progress_feedback_enabled:
                 with contextlib.suppress(Exception):
-                    await self.adapter.edit_text(stream_message, content)
-
-            answer = await self._stream_general_completion(
-                session_key=incoming.conversation_key,
-                llm_messages=llm_messages,
-                update_partial=update_partial,
+                    await self.adapter.reply_text(
+                        update.message,
+                        f"背景已加载完成（关系{relation_count}条，事件{event_count}条），正在生成回复...",
+                        reply_to_message_id=incoming.tg_message_id,
+                    )
+            typing_task = asyncio.create_task(
+                self.adapter.typing_loop(context, incoming.chat_id, interval_seconds=4.0)
             )
+
+            if self.config.bot.tg_stream and stream_message is not None:
+
+                async def update_partial(text: str) -> None:
+                    nonlocal stream_message
+                    content = text.strip() or "正在生成回复..."
+                    edited = await self._edit_with_retry(
+                        stream_message,
+                        content,
+                        retry_count,
+                    )
+                    if edited is not None:
+                        stream_message = edited
+
+                answer = await self._stream_general_completion(
+                    session_key=incoming.conversation_key,
+                    llm_messages=llm_messages,
+                    stream_buffer=stream_buffer,
+                    update_partial=update_partial,
+                    flush_interval_sec=stream_interval_sec,
+                )
+            else:
+                answer = await self._stream_general_completion(
+                    session_key=incoming.conversation_key,
+                    llm_messages=llm_messages,
+                    stream_buffer=stream_buffer,
+                    update_partial=None,
+                    flush_interval_sec=stream_interval_sec,
+                )
         except Exception:
             logger.exception("Dialogue task failed")
+            stream_buffer.clear()
             await self.adapter.reply_text(update.message, "LLM 服务请求失败，请稍后重试。")
             return
         finally:
-            typing_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await typing_task
+            if typing_task is not None:
+                typing_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await typing_task
 
-        final_answer = self._decorate_answer(answer.strip() or "我现在没有整理出有效答案。")
+        final_text = answer.strip() or "".join(stream_buffer).strip()
+        final_answer = self._decorate_answer(final_text or "我现在没有整理出有效答案。")
+        sent: Message | None = None
         if stream_message is not None:
-            sent = stream_message
-            with contextlib.suppress(Exception):
-                sent = await self.adapter.edit_text(stream_message, final_answer)
+            sent = await self._edit_with_retry(stream_message, final_answer, retry_count)
+            if sent is None:
+                sent = await self._reply_with_retry(
+                    update.message,
+                    final_answer,
+                    incoming.tg_message_id,
+                    retry_count,
+                )
+            if sent is None:
+                sent = stream_message
         else:
-            sent = await self.adapter.reply_text(
+            sent = await self._reply_with_retry(
                 update.message,
                 final_answer,
-                reply_to_message_id=incoming.tg_message_id,
+                incoming.tg_message_id,
+                retry_count,
             )
+        stream_buffer.clear()
         self.store.append_message(
             MessageRow(
                 conversation_key=incoming.conversation_key,
                 chat_id=incoming.chat_id,
                 chat_type=incoming.chat_type,
-                sender_id=sent.from_user.id if sent.from_user else None,
-                sender_name=sent.from_user.username if sent.from_user else self.config.bot.name,
+                sender_id=sent.from_user.id if sent and sent.from_user else None,
+                sender_name=(
+                    sent.from_user.username if sent and sent.from_user else self.config.bot.name
+                ),
                 sender_is_bot=True,
                 role="assistant",
                 content=final_answer,
-                tg_message_id=sent.message_id,
+                tg_message_id=sent.message_id if sent is not None else None,
             )
         )
         asyncio.create_task(

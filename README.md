@@ -65,6 +65,9 @@ conda run -n dllm python bot.py --log
 - `max_relation_depth`: BFS最大关系层数
 - `max_events_context`: 上下文最大时间事件数
 - `progress_feedback_enabled`: 是否发送 teach/对话中间进度提示
+- `tgStream`: 是否启用 Telegram 流式编辑回复
+- `tgStreamIntervalSec`: 流式编辑推送间隔（秒）
+- `tgStreamRetry`: Telegram 推送失败重试次数
 - `reply_style`: emoji/reaction 策略
 
 3. `config/memory.yaml`

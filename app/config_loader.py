@@ -40,6 +40,9 @@ class BotConfig:
     max_relation_depth: int
     max_events_context: int
     progress_feedback_enabled: bool
+    tg_stream_interval_sec: float
+    tg_stream_retry: int
+    tg_stream: bool
     reply_style: BotStyleConfig
 
 
@@ -112,6 +115,9 @@ def load_app_config(config_dir: str | Path = "config") -> AppConfig:
         max_relation_depth=int(bot_node.get("max_relation_depth", 2)),
         max_events_context=int(bot_node.get("max_events_context", 12)),
         progress_feedback_enabled=bool(bot_node.get("progress_feedback_enabled", True)),
+        tg_stream_interval_sec=max(0.1, float(bot_node.get("tgStreamIntervalSec", 1))),
+        tg_stream_retry=max(0, int(bot_node.get("tgStreamRetry", 2))),
+        tg_stream=bool(bot_node.get("tgStream", True)),
         reply_style=BotStyleConfig(**bot_node["reply_style"]),
     )
     memory = MemoryConfig(
