@@ -6,6 +6,7 @@ import logging
 import random
 import re
 import time
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 
 from telegram import Message, Update
@@ -43,6 +44,7 @@ class TelegramBotService:
         self.dispatcher = dispatcher
         self._bot_username: str | None = None
         self._bot_id: int | None = None
+        self._dialogue_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def close(self) -> None:
         self.dispatcher.shutdown()
@@ -374,182 +376,201 @@ class TelegramBotService:
             return
 
         await self._ensure_bot_identity(context)
-        if incoming.chat_type in {"group", "supergroup"}:
-            original_text = incoming.text
-            mention_text = self._extract_group_mention_text(update)
-            if mention_text is None:
-                if self.store.get_record_all(incoming.conversation_key):
-                    self.store.append_message(
-                        MessageRow(
-                            conversation_key=incoming.conversation_key,
-                            chat_id=incoming.chat_id,
-                            chat_type=incoming.chat_type,
-                            sender_id=incoming.sender_id,
-                            sender_name=incoming.sender_name,
-                            sender_is_bot=False,
-                            role="user",
-                            content=original_text,
-                            tg_message_id=incoming.tg_message_id,
+        session_key = incoming.conversation_key
+        lock = self._dialogue_locks[session_key]
+        queued_at = time.monotonic()
+        if lock.locked():
+            logger.info("dialogue session=%s queued", session_key)
+        async with lock:
+            waited_sec = time.monotonic() - queued_at
+            started_at = time.monotonic()
+            logger.info("dialogue session=%s start waited_sec=%.3f", session_key, waited_sec)
+            if incoming.chat_type in {"group", "supergroup"}:
+                original_text = incoming.text
+                mention_text = self._extract_group_mention_text(update)
+                if mention_text is None:
+                    if self.store.get_record_all(session_key):
+                        self.store.append_message(
+                            MessageRow(
+                                conversation_key=session_key,
+                                chat_id=incoming.chat_id,
+                                chat_type=incoming.chat_type,
+                                sender_id=incoming.sender_id,
+                                sender_name=incoming.sender_name,
+                                sender_is_bot=False,
+                                role="user",
+                                content=original_text,
+                                tg_message_id=incoming.tg_message_id,
+                            )
                         )
-                    )
-                    asyncio.create_task(
-                        self.dispatcher.run(
-                            incoming.conversation_key,
-                            self.memory_manager.maybe_compress_sync,
-                            incoming.conversation_key,
+                        asyncio.create_task(
+                            self.dispatcher.run(
+                                session_key,
+                                self.memory_manager.maybe_compress_sync,
+                                session_key,
+                            )
                         )
+                    logger.info(
+                        "dialogue session=%s skip_no_mention elapsed_sec=%.3f",
+                        session_key,
+                        time.monotonic() - started_at,
                     )
+                    return
+                incoming.text = mention_text
+
+            style = self.config.bot.reply_style
+            if style.add_reaction and incoming.tg_message_id is not None:
+                await self.adapter.set_reaction(
+                    context,
+                    incoming.chat_id,
+                    incoming.tg_message_id,
+                    style.processing_reaction,
+                )
+
+            self.store.append_message(
+                MessageRow(
+                    conversation_key=session_key,
+                    chat_id=incoming.chat_id,
+                    chat_type=incoming.chat_type,
+                    sender_id=incoming.sender_id,
+                    sender_name=incoming.sender_name,
+                    sender_is_bot=False,
+                    role="user",
+                    content=incoming.text,
+                    tg_message_id=incoming.tg_message_id,
+                )
+            )
+
+            retry_count = self.config.bot.tg_stream_retry
+            stream_interval_sec = self.config.bot.tg_stream_interval_sec
+            stream_buffer: list[str] = []
+            stream_message: Message | None = None
+            typing_task: asyncio.Task[None] | None = None
+            answer = ""
+            try:
+                llm_messages, relation_count, event_count = await self.dispatcher.run(
+                    session_key,
+                    self._build_dialogue_payload,
+                    session_key,
+                    str(incoming.sender_id or "unknown"),
+                    incoming.text,
+                )
+                logger.info(
+                    "dialogue session=%s context_ready relation_count=%s event_count=%s",
+                    session_key,
+                    relation_count,
+                    event_count,
+                )
+                stream_message = await self._reply_with_retry(
+                    update.message,
+                    "正在生成回复...",
+                    incoming.tg_message_id,
+                    retry_count,
+                )
+                if self.config.bot.progress_feedback_enabled:
+                    with contextlib.suppress(Exception):
+                        await self.adapter.reply_text(
+                            update.message,
+                            f"背景已加载完成（关系{relation_count}条，事件{event_count}条），正在生成回复...",
+                            reply_to_message_id=incoming.tg_message_id,
+                        )
+                typing_task = asyncio.create_task(
+                    self.adapter.typing_loop(context, incoming.chat_id, interval_seconds=4.0)
+                )
+
+                if self.config.bot.tg_stream and stream_message is not None:
+
+                    async def update_partial(text: str) -> None:
+                        nonlocal stream_message
+                        content = text.strip() or "正在生成回复..."
+                        edited = await self._edit_with_retry(
+                            stream_message,
+                            content,
+                            retry_count,
+                        )
+                        if edited is not None:
+                            stream_message = edited
+
+                    answer = await self._stream_general_completion(
+                        session_key=session_key,
+                        llm_messages=llm_messages,
+                        stream_buffer=stream_buffer,
+                        update_partial=update_partial,
+                        flush_interval_sec=stream_interval_sec,
+                    )
+                else:
+                    answer = await self._stream_general_completion(
+                        session_key=session_key,
+                        llm_messages=llm_messages,
+                        stream_buffer=stream_buffer,
+                        update_partial=None,
+                        flush_interval_sec=stream_interval_sec,
+                    )
+            except Exception:
+                logger.exception("Dialogue task failed")
+                stream_buffer.clear()
+                await self.adapter.reply_text(update.message, "LLM 服务请求失败，请稍后重试。")
                 return
-            incoming.text = mention_text
+            finally:
+                if typing_task is not None:
+                    typing_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await typing_task
 
-        style = self.config.bot.reply_style
-        if style.add_reaction and incoming.tg_message_id is not None:
-            await self.adapter.set_reaction(
-                context,
-                incoming.chat_id,
-                incoming.tg_message_id,
-                style.processing_reaction,
-            )
-
-        self.store.append_message(
-            MessageRow(
-                conversation_key=incoming.conversation_key,
-                chat_id=incoming.chat_id,
-                chat_type=incoming.chat_type,
-                sender_id=incoming.sender_id,
-                sender_name=incoming.sender_name,
-                sender_is_bot=False,
-                role="user",
-                content=incoming.text,
-                tg_message_id=incoming.tg_message_id,
-            )
-        )
-
-        retry_count = self.config.bot.tg_stream_retry
-        stream_interval_sec = self.config.bot.tg_stream_interval_sec
-        stream_buffer: list[str] = []
-        stream_message: Message | None = None
-        typing_task: asyncio.Task[None] | None = None
-        answer = ""
-        try:
-            llm_messages, relation_count, event_count = await self.dispatcher.run(
-                incoming.conversation_key,
-                self._build_dialogue_payload,
-                incoming.conversation_key,
-                str(incoming.sender_id or "unknown"),
-                incoming.text,
-            )
-            logger.info(
-                "dialogue session=%s context_ready relation_count=%s event_count=%s",
-                incoming.conversation_key,
-                relation_count,
-                event_count,
-            )
-            stream_message = await self._reply_with_retry(
-                update.message,
-                "正在生成回复...",
-                incoming.tg_message_id,
-                retry_count,
-            )
-            if self.config.bot.progress_feedback_enabled:
-                with contextlib.suppress(Exception):
-                    await self.adapter.reply_text(
+            final_text = answer.strip() or "".join(stream_buffer).strip()
+            final_answer = self._decorate_answer(final_text or "我现在没有整理出有效答案。")
+            sent: Message | None = None
+            if stream_message is not None:
+                sent = await self._edit_with_retry(stream_message, final_answer, retry_count)
+                if sent is None:
+                    sent = await self._reply_with_retry(
                         update.message,
-                        f"背景已加载完成（关系{relation_count}条，事件{event_count}条），正在生成回复...",
-                        reply_to_message_id=incoming.tg_message_id,
-                    )
-            typing_task = asyncio.create_task(
-                self.adapter.typing_loop(context, incoming.chat_id, interval_seconds=4.0)
-            )
-
-            if self.config.bot.tg_stream and stream_message is not None:
-
-                async def update_partial(text: str) -> None:
-                    nonlocal stream_message
-                    content = text.strip() or "正在生成回复..."
-                    edited = await self._edit_with_retry(
-                        stream_message,
-                        content,
+                        final_answer,
+                        incoming.tg_message_id,
                         retry_count,
                     )
-                    if edited is not None:
-                        stream_message = edited
-
-                answer = await self._stream_general_completion(
-                    session_key=incoming.conversation_key,
-                    llm_messages=llm_messages,
-                    stream_buffer=stream_buffer,
-                    update_partial=update_partial,
-                    flush_interval_sec=stream_interval_sec,
-                )
+                if sent is None:
+                    sent = stream_message
             else:
-                answer = await self._stream_general_completion(
-                    session_key=incoming.conversation_key,
-                    llm_messages=llm_messages,
-                    stream_buffer=stream_buffer,
-                    update_partial=None,
-                    flush_interval_sec=stream_interval_sec,
-                )
-        except Exception:
-            logger.exception("Dialogue task failed")
-            stream_buffer.clear()
-            await self.adapter.reply_text(update.message, "LLM 服务请求失败，请稍后重试。")
-            return
-        finally:
-            if typing_task is not None:
-                typing_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await typing_task
-
-        final_text = answer.strip() or "".join(stream_buffer).strip()
-        final_answer = self._decorate_answer(final_text or "我现在没有整理出有效答案。")
-        sent: Message | None = None
-        if stream_message is not None:
-            sent = await self._edit_with_retry(stream_message, final_answer, retry_count)
-            if sent is None:
                 sent = await self._reply_with_retry(
                     update.message,
                     final_answer,
                     incoming.tg_message_id,
                     retry_count,
                 )
-            if sent is None:
-                sent = stream_message
-        else:
-            sent = await self._reply_with_retry(
-                update.message,
-                final_answer,
-                incoming.tg_message_id,
-                retry_count,
+            stream_buffer.clear()
+            self.store.append_message(
+                MessageRow(
+                    conversation_key=session_key,
+                    chat_id=incoming.chat_id,
+                    chat_type=incoming.chat_type,
+                    sender_id=sent.from_user.id if sent and sent.from_user else None,
+                    sender_name=(
+                        sent.from_user.username if sent and sent.from_user else self.config.bot.name
+                    ),
+                    sender_is_bot=True,
+                    role="assistant",
+                    content=final_answer,
+                    tg_message_id=sent.message_id if sent is not None else None,
+                )
             )
-        stream_buffer.clear()
-        self.store.append_message(
-            MessageRow(
-                conversation_key=incoming.conversation_key,
-                chat_id=incoming.chat_id,
-                chat_type=incoming.chat_type,
-                sender_id=sent.from_user.id if sent and sent.from_user else None,
-                sender_name=(
-                    sent.from_user.username if sent and sent.from_user else self.config.bot.name
-                ),
-                sender_is_bot=True,
-                role="assistant",
-                content=final_answer,
-                tg_message_id=sent.message_id if sent is not None else None,
+            asyncio.create_task(
+                self.dispatcher.run(
+                    session_key,
+                    self.memory_manager.maybe_compress_sync,
+                    session_key,
+                )
             )
-        )
-        asyncio.create_task(
-            self.dispatcher.run(
-                incoming.conversation_key,
-                self.memory_manager.maybe_compress_sync,
-                incoming.conversation_key,
-            )
-        )
 
-        if style.add_reaction and incoming.tg_message_id is not None:
-            await self.adapter.set_reaction(
-                context,
-                incoming.chat_id,
-                incoming.tg_message_id,
-                style.done_reaction,
+            if style.add_reaction and incoming.tg_message_id is not None:
+                await self.adapter.set_reaction(
+                    context,
+                    incoming.chat_id,
+                    incoming.tg_message_id,
+                    style.done_reaction,
+                )
+            logger.info(
+                "dialogue session=%s completed elapsed_sec=%.3f",
+                session_key,
+                time.monotonic() - started_at,
             )

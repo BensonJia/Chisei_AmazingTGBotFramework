@@ -5,6 +5,7 @@
 - Telegram 兼容层（消息处理、typing、reaction、emoji）
 - OpenAI 风格接口 `/v1/chat/completions`（General/Summarizer/Verifier 三模型）
 - SQLite 聊天存储（按私聊用户 / 群聊 ID 分类）
+- 会话级隔离：同会话串行、跨会话并行
 - 会话超长后调用 LLM 自动总结压缩
 - 群聊中仅在被 `@BotUsername` 时触发回复
 - `/teach`：基于最近 24 条消息构建时间逻辑与人物关系图
@@ -65,6 +66,8 @@ conda run -n dllm python bot.py --log
 - `max_relation_depth`: BFS最大关系层数
 - `max_events_context`: 上下文最大时间事件数
 - `progress_feedback_enabled`: 是否发送 teach/对话中间进度提示
+- `concurrent_updates`: Telegram Update 并发处理数（跨会话并行）
+- `dispatcher_max_workers`: 线程池工作线程数（阻塞任务并发）
 - `tgStream`: 是否启用 Telegram 流式编辑回复
 - `tgStreamIntervalSec`: 流式编辑推送间隔（秒）
 - `tgStreamRetry`: Telegram 推送失败重试次数

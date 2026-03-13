@@ -57,7 +57,7 @@ def main() -> None:
     memory_manager = MemoryManager(store=store, llm_router=llm_router, config=config.memory)
     context_builder = ContextBuilder(store=store, config=config)
     teach_service = TeachService(store=store, llm_router=llm_router, config=config)
-    dispatcher = SessionTaskDispatcher(max_workers=8)
+    dispatcher = SessionTaskDispatcher(max_workers=config.bot.dispatcher_max_workers)
     adapter = TelegramAdapter()
     service = TelegramBotService(
         config=config,
@@ -70,7 +70,12 @@ def main() -> None:
         dispatcher=dispatcher,
     )
 
-    app = Application.builder().token(config.bot.token).build()
+    app = (
+        Application.builder()
+        .token(config.bot.token)
+        .concurrent_updates(config.bot.concurrent_updates)
+        .build()
+    )
     app.add_handler(TypeHandler(Update, service.on_any_update_log), group=-2)
     app.add_handler(MessageHandler(filters.ALL, service.on_any_message_log), group=-1)
     app.add_handler(CommandHandler("start", service.on_start))

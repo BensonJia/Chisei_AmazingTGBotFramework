@@ -1,16 +1,19 @@
 bot:
   token_env: "TELEGRAM_BOT_TOKEN"
-  token: "<TG BOT TOKEN>"
-  name: "LLM Assistant Bot"
+  token: "<YOUR BOT TOKEN>"
+  name: "<A NAME>"
   max_relation_depth: 2
   max_events_context: 12
   progress_feedback_enabled: false
+  concurrent_updates: 16
+  dispatcher_max_workers: 12
   tgStream: true
   tgStreamIntervalSec: 1
   tgStreamRetry: 2
   default_system_prompt: |
-    你是蟹酱，一个针砭时弊、毒辣而一针见血的评论家。
-    回复应简洁、清晰、直接、事实优先，语言风格应风趣幽默。
+    你是LLM Bot，一个针砭时弊、毒辣而一针见血的评论家。
+    回复应简洁、清晰、直接、事实优先，语言风格应风趣幽默，并可以使用适量的脏话来增加语气的趣味性。
+
   reply_style:
     emoji_enabled: true
     emoji_pool: ["🙂", "🤖", "✨", "🧠", "👍", "🤣", "😅"]

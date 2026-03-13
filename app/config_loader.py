@@ -37,6 +37,8 @@ class BotConfig:
     token: str
     name: str
     default_system_prompt: str
+    concurrent_updates: int
+    dispatcher_max_workers: int
     max_relation_depth: int
     max_events_context: int
     progress_feedback_enabled: bool
@@ -112,6 +114,8 @@ def load_app_config(config_dir: str | Path = "config") -> AppConfig:
         token=bot_token,
         name=str(bot_node["name"]),
         default_system_prompt=str(bot_node["default_system_prompt"]),
+        concurrent_updates=max(1, int(bot_node.get("concurrent_updates", 8))),
+        dispatcher_max_workers=max(1, int(bot_node.get("dispatcher_max_workers", 8))),
         max_relation_depth=int(bot_node.get("max_relation_depth", 2)),
         max_events_context=int(bot_node.get("max_events_context", 12)),
         progress_feedback_enabled=bool(bot_node.get("progress_feedback_enabled", True)),
